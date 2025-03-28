@@ -542,39 +542,45 @@ void initializeProcessor(int threadId, processorNode *node, char *dirName) {
 }
 
 void printProcessorState(int processorId, processorNode node) {
-    const char *dirStateStr[] = { "EM", "S", "U" };
-    const char *cacheStateStr[] = { "MODIFIED", "EXCLUSIVE", "SHARED", "INVALID" };
+    static const char *cacheStateStr[] = { "MODIFIED", "EXCLUSIVE", "SHARED", "INVALID" };
+    static const char *dirStateStr[] = { "EM", "S", "U" };
 
+    #pragma omp critical
+    {
     printf("=======================================\n");
     printf(" Processor Node: %d\n", processorId);
     printf("=======================================\n\n");
 
-    printf("-------- Memory State -------\n");
-    printf("| Index | Address | Value   |\n");
-    printf("|---------------------------|\n");
+    // Print memory state
+    printf("-------- Memory State --------\n");
+    printf("| Index | Address |   Value  |\n");
+    printf("|----------------------------|\n");
     for (int i = 0; i < MEM_SIZE; i++) {
-        printf("|  %3d  |  0x%02X   |  %5d  |\n", i,
-               (processorId << 4) + i, node.memory[i]);
+        printf("|  %3d  |  0x%02X   |  %5d   |\n", i, (processorId << 4) + i,
+                node.memory[i]);
     }
-    printf("-----------------------------\n\n");
+    printf("------------------------------\n\n");
 
-    printf("------------ Directory State --------------\n");
-    printf("| Index | Address | State | BitVector     |\n");
-    printf("|-----------------------------------------|\n");
+    // Print directory state
+    printf("------------ Directory State ---------------\n");
+    printf("| Index | Address | State |    BitVector   |\n");
+    printf("|------------------------------------------|\n");
     for (int i = 0; i < MEM_SIZE; i++) {
-        printf("|  %3d  |  0x%02X   |  %2s  |   0x%08X   |\n", i,
-               (processorId << 4) + i, dirStateStr[node.directory[i].state],
-               node.directory[i].bitVector);
+        printf("|  %3d  |  0x%02X   |  %2s   |   0x%08B   |\n", i,
+                (processorId << 4) + i, dirStateStr[node.directory[i].state],
+                node.directory[i].bitVector);
     }
-    printf("-------------------------------------------\n\n");
-
+    printf("--------------------------------------------\n\n");
+    
+    // Print cache state
     printf("------------ Cache State ----------------\n");
-    printf("| Index | Address | Value |  State      |\n");
+    printf("| Index | Address | Value |    State    |\n");
     printf("|---------------------------------------|\n");
     for (int i = 0; i < CACHE_SIZE; i++) {
-        printf("|  %3d  |  0x%02X   |  %3d  |  %-9s  |\n", i,
-               node.cache[i].address, node.cache[i].value,
+        printf("|  %3d  |  0x%02X   |  %3d  |  %8s \t|\n", 
+               i, node.cache[i].address, node.cache[i].value,
                cacheStateStr[node.cache[i].state]);
     }
     printf("----------------------------------------\n\n");
+    }
 } 

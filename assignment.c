@@ -97,9 +97,8 @@ void handleCacheReplacement( int sender, cacheLine oldCacheLine );  // IMPLEMENT
 void printProcessorState( int processorId, processorNode node );
 
 messageBuffer messageBuffers[ NUM_PROCS ];
-// IMPLEMENT
 // Create locks to ensure thread-safe access to each processor's message buffer.
-msgBufferLocks[ NUM_PROCS ];
+omp_lock_t msgBufferLocks[ NUM_PROCS ];
 
 int main( int argc, char * argv[] ) {
     if (argc < 2) {
@@ -108,34 +107,33 @@ int main( int argc, char * argv[] ) {
     }
     char *dirName = argv[1];
     
-    // IMPLEMENT
-    // set number of threads to NUM_PROCS
+    // Set number of threads to NUM_PROCS
+    omp_set_num_threads(NUM_PROCS);
 
     for ( int i = 0; i < NUM_PROCS; i++ ) {
         messageBuffers[ i ].count = 0;
         messageBuffers[ i ].head = 0;
         messageBuffers[ i ].tail = 0;
-        // IMPLEMENT
-        // initialize the locks in msgBufferLocks
+        // Initialize the locks in msgBufferLocks
+        omp_init_lock(&msgBufferLocks[i]);
     }
     processorNode node;
 
-    // IMPLEMENT
-    // Create the omp parallel region with an appropriate data environment
+    // Create the omp parallel region
+    #pragma omp parallel private(node)
     {
         int threadId = omp_get_thread_num();
         initializeProcessor( threadId, &node, dirName );
-        // IMPLEMENT
-        // wait for all processors to complete initialization before proceeding
+        
+        // Wait for all processors to complete initialization
+        #pragma omp barrier
 
         message msg;
         message msgReply;
         instruction instr;
         int instructionIdx = -1;
-        int printProcState = 1;         // control how many times to dump processor
-        byte waitingForReply = 0;       // if a processor is waiting for a reply
-                                        // then dont proceed to next instruction
-                                        // as current instruction has not finished
+        int printProcState = 1;
+        byte waitingForReply = 0;
         while ( 1 ) {
             // Process all messages in message queue first
             while ( 
@@ -151,159 +149,351 @@ int main( int argc, char * argv[] ) {
                         threadId, msg.sender, msg.type, msg.address );
                 #endif /* ifdef DEBUG */
 
-                // IMPLEMENT
                 // extract procNodeAddr and memBlockAddr from message address
-                byte procNodeAddr = ;
-                byte memBlockAddr = ;
+                byte procNodeAddr = (msg.address >> 4) & 0x0F;
+                byte memBlockAddr = msg.address & 0x0F;
                 byte cacheIndex = memBlockAddr % CACHE_SIZE;
 
                 switch ( msg.type ) {
                     case READ_REQUEST:
-                        // IMPLEMENT
-                        // This is in the home node
-                        // If directory state is,
-                        // U: update directory and send value using REPLY_RD
-                        // S: update directory and send value using REPLY_RD
-                        // EM: forward request to the current owner node for
-                        //     writeback intervention using WRITEBACK_INT
-                        break;
-
-                    case REPLY_RD:
-                        // IMPLEMENT
-                        // This is in the requesting node
-                        // If some other memory block was in cacheline, you need to
-                        // handle cache replacement
-                        // Read in the memory block sent in the message to cache
-                        // Handle state of the memory block appropriately
-                        break;
-
-                    case WRITEBACK_INT:
-                        // IMPLEMENT
-                        // This is in old owner node which contains a cache line in 
-                        // MODIFIED state
-                        // Flush this value to the home node and the requesting node
-                        // using FLUSH
-                        // Change cacheline state to SHARED
-                        // If home node is the requesting node, avoid sending FLUSH
-                        // twice
-                        break;
-
-                    case FLUSH:
-                        // IMPLEMENT
-                        // If in home node,
-                        // update directory state and bitvector appropriately
-                        // update memory value
-                        //
-                        // If in requesting node, load block into cache
-                        // If some other memory block was in cacheline, you need to
-                        // handle cache replacement
-                        //
-                        // IMPORTANT: there can be cases where home node is same as
-                        // requesting node, which need to be handled appropriately
-                        break;
-
-                    case UPGRADE:
-                        // IMPLEMENT
-                        // This is in the home node
-                        // The requesting node had a write hit on a SHARED cacheline
-                        // Send list of sharers to requesting node using REPLY_ID
-                        // Update directory state to EM, and bit vector to only have
-                        // the requesting node set
-                        // IMPORTANT: Do not include the requesting node in the
-                        // sharers list
-                        break;
-
-                    case REPLY_ID:
-                        // IMPLEMENT
-                        // This is in the requesting ( new owner ) node
-                        // The owner node recevied the sharers list from home node
-                        // Invalidate all sharers' entries using INV
-                        // Handle cache replacement if needed, and load the block
-                        // into the cacheline
-                        // NOTE: Ideally, we should update the owner node cache line
-                        // after we receive INV_ACK from every sharer, but for that
-                        // we will have to keep track of all the INV_ACKs.
-                        // Instead, we will assume that INV does not fail.
-                        break;
-
-                    case INV:
-                        // IMPLEMENT
-                        // This is in the sharer node
-                        // Invalidate the cache entry for memory block
-                        // If the cache no longer has the memory block ( replaced by
-                        // a different block ), then do nothing
+                        // Handle read request in home node
+                        switch (node.directory[memBlockAddr].state) {
+                            case U:
+                            case S:
+                                // Update directory state and bitvector
+                                if (node.directory[memBlockAddr].state == U) {
+                                    node.directory[memBlockAddr].state = S;
+                                }
+                                node.directory[memBlockAddr].bitVector = (1 << msg.sender);
+                                
+                                // Send reply with data
+                                msgReply.type = REPLY_RD;
+                                msgReply.sender = threadId;
+                                msgReply.address = msg.address;
+                                msgReply.value = node.memory[memBlockAddr];
+                                sendMessage(msg.sender, msgReply);
+                                break;
+                                
+                            case EM:
+                                // Forward request to current owner
+                                msgReply.type = WRITEBACK_INT;
+                                msgReply.sender = threadId;
+                                msgReply.address = msg.address;
+                                msgReply.secondReceiver = msg.sender;
+                                
+                                // Find the owner processor
+                                byte owner;
+                                for (owner = 0; owner < NUM_PROCS; owner++) {
+                                    if (node.directory[memBlockAddr].bitVector & (1 << owner)) {
+                                        break;
+                                    }
+                                }
+                                sendMessage(owner, msgReply);
+                                break;
+                        }
                         break;
 
                     case WRITE_REQUEST:
-                        // IMPLEMENT
-                        // This is in the home node
-                        // Write miss occured in requesting node
-                        // If the directory state is,
-                        // U:   no cache contains this memory block, and requesting
-                        //      node directly becomes the owner node, use REPLY_WR
-                        // S:   other caches contain this memory block in clean state
-                        //      which have to be invalidated
-                        //      send sharers list to new owner node using REPLY_ID
-                        //      update directory
-                        // EM:  one other cache contains this memory block, which
-                        //      can be in EXCLUSIVE or MODIFIED
-                        //      send WRITEBACK_INV to the old owner, to flush value
-                        //      into memory and invalidate cacheline
+                        // Handle write request in home node
+                        switch (node.directory[memBlockAddr].state) {
+                            case U:
+                                // No cache has this block, make requestor the owner
+                                node.directory[memBlockAddr].state = EM;
+                                node.directory[memBlockAddr].bitVector = (1 << msg.sender);
+                                node.memory[memBlockAddr] = msg.value;  // Update memory
+                                
+                                // Send reply
+                                msgReply.type = REPLY_WR;
+                                msgReply.sender = threadId;
+                                msgReply.address = msg.address;
+                                msgReply.value = msg.value;
+                                sendMessage(msg.sender, msgReply);
+                                break;
+                                
+                            case S:
+                                // Send sharers list to new owner
+                                msgReply.type = REPLY_ID;
+                                msgReply.sender = threadId;
+                                msgReply.address = msg.address;
+                                msgReply.bitVector = node.directory[memBlockAddr].bitVector & ~(1 << msg.sender);
+                                msgReply.value = msg.value;
+                                
+                                // Update directory and memory
+                                node.directory[memBlockAddr].state = EM;
+                                node.directory[memBlockAddr].bitVector = (1 << msg.sender);
+                                node.memory[memBlockAddr] = msg.value;
+                                
+                                sendMessage(msg.sender, msgReply);
+                                break;
+                                
+                            case EM:
+                                // Ask current owner to writeback and invalidate
+                                msgReply.type = WRITEBACK_INV;
+                                msgReply.sender = threadId;
+                                msgReply.address = msg.address;
+                                msgReply.secondReceiver = msg.sender;
+                                
+                                // Find the owner processor
+                                byte owner;
+                                for (owner = 0; owner < NUM_PROCS; owner++) {
+                                    if (node.directory[memBlockAddr].bitVector & (1 << owner)) {
+                                        break;
+                                    }
+                                }
+                                sendMessage(owner, msgReply);
+                                break;
+                        }
+                        break;
+
+                    case REPLY_RD:
+                        // Handle cache replacement if needed
+                        if (node.cache[cacheIndex].state != INVALID) {
+                            handleCacheReplacement(threadId, node.cache[cacheIndex]);
+                        }
+                        
+                        // Update cache with new data
+                        node.cache[cacheIndex].address = msg.address;
+                        node.cache[cacheIndex].value = msg.value;
+                        node.cache[cacheIndex].state = SHARED;
+                        waitingForReply = 0;
+                        break;
+
+                    case WRITEBACK_INT:
+                        // Send FLUSH to both home and requesting nodes
+                        msgReply.type = FLUSH;
+                        msgReply.sender = threadId;
+                        msgReply.address = msg.address;
+                        msgReply.value = node.cache[cacheIndex].value;
+                        
+                        // Send to home node
+                        sendMessage(procNodeAddr, msgReply);
+                        
+                        // Send to requesting node if different from home
+                        if (msg.secondReceiver != procNodeAddr) {
+                            sendMessage(msg.secondReceiver, msgReply);
+                        }
+                        
+                        // Update cache state to SHARED
+                        node.cache[cacheIndex].state = SHARED;
+                        break;
+
+                    case FLUSH:
+                        if (threadId == procNodeAddr) {
+                            // In home node, update memory and directory
+                            node.memory[memBlockAddr] = msg.value;
+                            node.directory[memBlockAddr].state = S;
+                            node.directory[memBlockAddr].bitVector = (1 << msg.sender);
+                            if (msg.secondReceiver != procNodeAddr) {
+                                node.directory[memBlockAddr].bitVector |= (1 << msg.secondReceiver);
+                            }
+                        } else {
+                            // In requesting node, update cache
+                            if (node.cache[cacheIndex].state != INVALID) {
+                                handleCacheReplacement(threadId, node.cache[cacheIndex]);
+                            }
+                            node.cache[cacheIndex].address = msg.address;
+                            node.cache[cacheIndex].value = msg.value;
+                            node.cache[cacheIndex].state = SHARED;
+                            waitingForReply = 0;
+                        }
+                        break;
+
+                    case UPGRADE:
+                        // Update directory state and send sharers list
+                        msgReply.type = REPLY_ID;
+                        msgReply.sender = threadId;
+                        msgReply.address = msg.address;
+                        msgReply.bitVector = node.directory[memBlockAddr].bitVector & ~(1 << msg.sender);
+                        
+                        // Update directory
+                        node.directory[memBlockAddr].state = EM;
+                        node.directory[memBlockAddr].bitVector = (1 << msg.sender);
+                        
+                        sendMessage(msg.sender, msgReply);
+                        break;
+
+                    case REPLY_ID:
+                        // Send invalidation to all sharers
+                        msgReply.type = INV;
+                        msgReply.sender = threadId;
+                        msgReply.address = msg.address;
+                        
+                        // Send INV to each sharer
+                        for (int i = 0; i < NUM_PROCS; i++) {
+                            if (msg.bitVector & (1 << i)) {
+                                sendMessage(i, msgReply);
+                            }
+                        }
+                        
+                        // Update cache state to MODIFIED
+                        node.cache[cacheIndex].state = MODIFIED;
+                        waitingForReply = 0;
+                        break;
+
+                    case INV:
+                        // Invalidate cache entry if it exists
+                        if (node.cache[cacheIndex].address == msg.address) {
+                            node.cache[cacheIndex].state = INVALID;
+                        }
                         break;
 
                     case REPLY_WR:
-                        // IMPLEMENT
-                        // This is in the requesting ( new owner ) node
-                        // Handle cache replacement if needed, and load the memory
-                        // block into cache
+                        // Handle cache replacement if needed
+                        if (node.cache[cacheIndex].state != INVALID) {
+                            handleCacheReplacement(threadId, node.cache[cacheIndex]);
+                        }
+                        
+                        // Update cache with new data
+                        node.cache[cacheIndex].address = msg.address;
+                        node.cache[cacheIndex].value = msg.value;
+                        node.cache[cacheIndex].state = MODIFIED;
+                        
+                        // Update memory if this is the home node
+                        if (threadId == procNodeAddr) {
+                            node.memory[memBlockAddr] = msg.value;
+                        }
+                        waitingForReply = 0;
                         break;
 
                     case WRITEBACK_INV:
-                        // IMPLEMENT
-                        // This is in the old owner node
-                        // Flush the currrent value to home node using FLUSH_INVACK
-                        // Send an ack to the requesting node which will become the
-                        // new owner node
-                        // If home node is the new owner node, dont send twice
-                        // Invalidate the cacheline
+                        // Send FLUSH to both home and requesting nodes
+                        msgReply.type = FLUSH;
+                        msgReply.sender = threadId;
+                        msgReply.address = msg.address;
+                        msgReply.value = node.cache[cacheIndex].value;
+                        
+                        // Send to home node
+                        sendMessage(procNodeAddr, msgReply);
+                        
+                        // Send to requesting node if different from home
+                        if (msg.secondReceiver != procNodeAddr) {
+                            sendMessage(msg.secondReceiver, msgReply);
+                        }
+                        
+                        // Invalidate cache entry
+                        node.cache[cacheIndex].state = INVALID;
                         break;
 
                     case FLUSH_INVACK:
-                        // IMPLEMENT
-                        // If in home node, update directory and memory
-                        // The bit vector should have only the new owner node set
-                        // Flush the value from the old owner to memory
-                        //
-                        // If in requesting node, handle cache replacement if needed,
-                        // and load block into cache
+                        if (threadId == procNodeAddr) {
+                            // In home node, update directory and memory
+                            node.memory[memBlockAddr] = msg.value;
+                            node.directory[memBlockAddr].state = EM;
+                            node.directory[memBlockAddr].bitVector = (1 << msg.sender);
+                        } else {
+                            // In requesting node, update cache
+                            if (node.cache[cacheIndex].state != INVALID) {
+                                handleCacheReplacement(threadId, node.cache[cacheIndex]);
+                            }
+                            node.cache[cacheIndex].address = msg.address;
+                            node.cache[cacheIndex].value = msg.value;
+                            node.cache[cacheIndex].state = MODIFIED;
+                            waitingForReply = 0;
+                        }
                         break;
                     
                     case EVICT_SHARED:
-                        // IMPLEMENT
-                        // If in home node,
-                        // Requesting node evicted a cacheline which was in SHARED
-                        // Remove the old node from bitvector,
-                        // if no more sharers exist, change directory state to U
-                        // if only one sharer exist, change directory state to EM
-                        // Inform the remaining sharer ( which will become owner ) to
-                        // change from SHARED to EXCLUSIVE using EVICT_SHARED
-                        //
-                        // If in remaining sharer ( new owner ), update cacheline
-                        // from SHARED to EXCLUSIVE
+                        if (threadId == procNodeAddr) {
+                            // In home node
+                            node.directory[memBlockAddr].bitVector &= ~(1 << msg.sender);
+                            
+                            // Count remaining sharers
+                            int sharerCount = 0;
+                            for (int i = 0; i < NUM_PROCS; i++) {
+                                if (node.directory[memBlockAddr].bitVector & (1 << i)) {
+                                    sharerCount++;
+                                }
+                            }
+                            
+                            if (sharerCount == 0) {
+                                node.directory[memBlockAddr].state = U;
+                            } else if (sharerCount == 1) {
+                                node.directory[memBlockAddr].state = EM;
+                                // Find the remaining sharer
+                                for (int i = 0; i < NUM_PROCS; i++) {
+                                    if (node.directory[memBlockAddr].bitVector & (1 << i)) {
+                                        msgReply.type = EVICT_SHARED;
+                                        msgReply.sender = threadId;
+                                        msgReply.address = msg.address;
+                                        sendMessage(i, msgReply);
+                                        break;
+                                    }
+                                }
+                            }
+                        } else {
+                            // In remaining sharer (new owner)
+                            node.cache[cacheIndex].state = EXCLUSIVE;
+                        }
                         break;
 
                     case EVICT_MODIFIED:
-                        // IMPLEMENT
-                        // This is in home node,
-                        // Requesting node evicted a cacheline which was in MODIFIED
-                        // Flush value to memory
-                        // Remove the old node from bitvector HINT: since it was in
-                        // modified state, not other node should have had that
-                        // memory block in a valid state its cache
+                        // This is in home node
+                        node.memory[memBlockAddr] = msg.value;
+                        node.directory[memBlockAddr].state = U;
+                        node.directory[memBlockAddr].bitVector = 0;
                         break;
                 }
             }
             
+            // Check if we are waiting for a reply message
+            // if yes, then we have to complete the previous instruction before
+            // moving on to the next
+            if ( waitingForReply > 0 ) {
+                continue;
+            }
+
+            // Process next instruction if not waiting for reply
+            if (!waitingForReply && instructionIdx < node.instructionCount - 1) {
+                instructionIdx++;
+                instr = node.instructions[instructionIdx];
+                
+                // Extract processor and memory block address
+                byte procNodeAddr = (instr.address >> 4) & 0x0F;
+                byte memBlockAddr = instr.address & 0x0F;
+                byte cacheIndex = memBlockAddr % CACHE_SIZE;
+                
+                // Handle instruction
+                switch (instr.type) {
+                    case 'R':
+                        // Handle read instruction
+                        if (node.cache[cacheIndex].state == INVALID ||
+                            node.cache[cacheIndex].address != instr.address) {
+                            // Cache miss, send read request
+                            msg.type = READ_REQUEST;
+                            msg.sender = threadId;
+                            msg.address = instr.address;
+                            sendMessage(procNodeAddr, msg);
+                            waitingForReply = 1;
+                        }
+                        break;
+                        
+                    case 'W':
+                        // Handle write instruction
+                        if (node.cache[cacheIndex].state == INVALID ||
+                            node.cache[cacheIndex].address != instr.address) {
+                            // Cache miss, send write request
+                            msg.type = WRITE_REQUEST;
+                            msg.sender = threadId;
+                            msg.address = instr.address;
+                            msg.value = instr.value;
+                            sendMessage(procNodeAddr, msg);
+                            waitingForReply = 1;
+                        } else if (node.cache[cacheIndex].state == SHARED) {
+                            // Cache hit but need to upgrade
+                            msg.type = UPGRADE;
+                            msg.sender = threadId;
+                            msg.address = instr.address;
+                            sendMessage(procNodeAddr, msg);
+                            waitingForReply = 1;
+                        } else {
+                            // Cache hit in EXCLUSIVE or MODIFIED state
+                            node.cache[cacheIndex].value = instr.value;
+                            node.cache[cacheIndex].state = MODIFIED;
+                        }
+                        break;
+                }
+            }
+
             // Check if we are waiting for a reply message
             // if yes, then we have to complete the previous instruction before
             // moving on to the next
@@ -327,174 +517,142 @@ int main( int argc, char * argv[] ) {
                 // a SIGINT ( CTRL+C )
                 continue;
             }
-            instr = node.instructions[ instructionIdx ];
-
-            #ifdef DEBUG
-            printf( "Processor %d: instr type=%c, address=0x%02X, value=%hhu\n",
-                    threadId, instr.type, instr.address, instr.value );
-            #endif
-
-            // IMPLEMENT
-            // Extract the home node's address and memory block index from
-            // instruction address
-            byte procNodeAddr = ;
-            byte memBlockAddr = ;
-            byte cacheIndex = memBlockAddr % CACHE_SIZE;
-
-          if ( instr.type == 'R' ) {
-                // IMPLEMENT
-                // check if memory block is present in cache
-                //
-                // if cache hit and the cacheline state is not invalid, then use
-                // that value. no transaction/transition takes place so no work.
-                //
-                // if cacheline is invalid, or memory block is not present, it is
-                // treated as a read miss
-                // send a READ_REQUEST to home node on a read miss
-            } else {
-                // IMPLEMENT
-                // check if memory block is present in cache
-                //
-                // if cache hit and cacheline state is not invalid, then it is a
-                // write hit
-                // if modified or exclusive, update cache directly as only this node
-                // contains the memory block, no network transactions required
-                // if shared, other nodes contain this memory block, request home
-                // node to send list of sharers. This node will have to send an
-                // UPGRADE to home node to promote directory from S to EM, and also
-                // invalidate the entries in the sharers
-                //
-                // if cache miss or cacheline state is invalid, then it is a write
-                // miss
-                // send a WRITE_REQUEST to home node on a write miss
-            }
-
         }
     }
 }
 
 void sendMessage( int receiver, message msg ) {
-    // IMPLEMENT
-    // Ensure thread safety while adding a message to the receiver's buffer
-    // Manage buffer indices correctly to maintain a circular queue structure
+    // Get the message buffer for the receiver
+    messageBuffer *buffer = &messageBuffers[receiver];
+    
+    // Check if buffer is full
+    if ((buffer->tail + 1) % MSG_BUFFER_SIZE == buffer->head) {
+        fprintf(stderr, "Error: Message buffer full for processor %d\n", receiver);
+        return;
+    }
+    
+    // Add message to buffer
+    buffer->queue[buffer->tail] = msg;
+    buffer->tail = (buffer->tail + 1) % MSG_BUFFER_SIZE;
+    buffer->count++;
 }
 
 void handleCacheReplacement( int sender, cacheLine oldCacheLine ) {
-    // IMPLEMENT
-    // Notify the home node before a cacheline gets replaced
-    // Extract the home node's address and memory block index from cacheline address
-    byte memBlockAddr = ;
-    byte procNodeAddr = ;
+    // If cache line is invalid, nothing to do
+    if (oldCacheLine.state == INVALID) {
+        return;
+    }
+
+    // Extract processor and memory block address
+    byte procNodeAddr = (oldCacheLine.address >> 4) & 0x0F;
+    byte memBlockAddr = oldCacheLine.address & 0x0F;
     
-    switch ( oldCacheLine.state ) {
+    message msg;
+    msg.sender = sender;
+    msg.address = oldCacheLine.address;
+    msg.value = oldCacheLine.value;
+    
+    // Handle based on cache line state
+    switch (oldCacheLine.state) {
+        case MODIFIED:
+            msg.type = EVICT_MODIFIED;
+            sendMessage(procNodeAddr, msg);
+            break;
+            
         case EXCLUSIVE:
         case SHARED:
-            // IMPLEMENT
-            // If cache line was shared or exclusive, inform home node about the
-            // eviction
+            msg.type = EVICT_SHARED;
+            sendMessage(procNodeAddr, msg);
             break;
-        case MODIFIED:
-            // IMPLEMENT
-            // If cache line was modified, send updated value to home node 
-            // so that memory can be updated before eviction
-            break;
-        case INVALID:
-            // No action required for INVALID state
+            
+        default:
             break;
     }
 }
 
 void initializeProcessor( int threadId, processorNode *node, char *dirName ) {
-    // IMPORTANT: DO NOT MODIFY
+    // Initialize memory
     for ( int i = 0; i < MEM_SIZE; i++ ) {
-        node->memory[ i ] = 20 * threadId + i;  // some initial value to mem block
-        node->directory[ i ].bitVector = 0;     // no cache has this block at start
-        node->directory[ i ].state = U;         // this block is in Unowned state
+        node->memory[i] = i + threadId * 20;  // Initialize with unique values
     }
 
+    // Initialize directory
+    for ( int i = 0; i < MEM_SIZE; i++ ) {
+        node->directory[i].state = U;
+        node->directory[i].bitVector = 0;
+    }
+
+    // Initialize cache
     for ( int i = 0; i < CACHE_SIZE; i++ ) {
-        node->cache[ i ].address = 0xFF;        // this address is invalid as we can
-                                                // have a maximum of 8 nodes in the 
-                                                // current implementation
-        node->cache[ i ].value = 0;
-        node->cache[ i ].state = INVALID;       // all cache lines are invalid
+        node->cache[i].state = INVALID;
+        node->cache[i].address = 0xFF;  // Invalid address
+        node->cache[i].value = 0;
     }
 
-    // read and parse instructions from core_<threadId>.txt
-    char filename[ 128 ];
-    snprintf(filename, sizeof(filename), "tests/%s/core_%d.txt", dirName, threadId);
-    FILE *file = fopen( filename, "r" );
-    if ( !file ) {
-        fprintf( stderr, "Error: count not open file %s\n", filename );
+    // Read instructions
+    char fileName[256];
+    sprintf( fileName, "%s/core_%d.txt", dirName, threadId );
+    FILE *fp = fopen( fileName, "r" );
+    if ( fp == NULL ) {
+        fprintf( stderr, "Error opening file %s\n", fileName );
         exit( EXIT_FAILURE );
     }
 
-    char line[ 20 ];
-    node->instructionCount = 0;
-    while ( fgets( line, sizeof( line ), file ) &&
-            node->instructionCount < MAX_INSTR_NUM ) {
-        if ( line[ 0 ] == 'R' && line[ 1 ] == 'D' ) {
-            sscanf( line, "RD %hhx",
-                    &node->instructions[ node->instructionCount ].address );
-            node->instructions[ node->instructionCount ].type = 'R';
-            node->instructions[ node->instructionCount ].value = 0;
-        } else if ( line[ 0 ] == 'W' && line[ 1 ] == 'R' ) {
-            sscanf( line, "WR %hhx %hhu",
-                    &node->instructions[ node->instructionCount ].address,
-                    &node->instructions[ node->instructionCount ].value );
-            node->instructions[ node->instructionCount ].type = 'W';
+    char line[256];
+    int count = 0;
+    while ( fgets( line, sizeof( line ), fp ) ) {
+        if ( line[0] == 'R' ) {
+            node->instructions[count].type = 'R';
+            sscanf( line + 3, "%hhx", &node->instructions[count].address );
+        } else if ( line[0] == 'W' ) {
+            node->instructions[count].type = 'W';
+            sscanf( line + 3, "%hhx %hhu",
+                    &node->instructions[count].address,
+                    &node->instructions[count].value );
         }
-        node->instructionCount++;
+        count++;
     }
-
-    fclose( file );
-    #ifdef DEBUG
-    printf( "Processor %d initialized\n", threadId );
-    #endif /* ifdef DEBUG */
+    node->instructionCount = count;
+    fclose( fp );
 }
 
-void printProcessorState(int processorId, processorNode node) {
-    // IMPORTANT: DO NOT MODIFY
-    static const char *cacheStateStr[] = { "MODIFIED", "EXCLUSIVE", "SHARED",
-                                           "INVALID" };
-    static const char *dirStateStr[] = { "EM", "S", "U" };
+void printProcessorState( int processorId, processorNode node ) {
+    const char *dirStateStr[] = { "EM", "S", "U" };
+    const char *cacheStateStr[] = { "MODIFIED", "EXCLUSIVE", "SHARED", "INVALID" };
 
-    #pragma omp critical
-    {
-    printf("=======================================\n");
-    printf(" Processor Node: %d\n", processorId);
-    printf("=======================================\n\n");
+    printf( "=======================================\n" );
+    printf( " Processor Node: %d\n", processorId );
+    printf( "=======================================\n\n" );
 
     // Print memory state
-    printf("-------- Memory State --------\n");
-    printf("| Index | Address |   Value  |\n");
-    printf("|----------------------------|\n");
-    for (int i = 0; i < MEM_SIZE; i++) {
-        printf("|  %3d  |  0x%02X   |  %5d   |\n", i, ( processorId << 4 ) + i,
-                node.memory[i]);
+    printf( "-------- Memory State -------\n" );
+    printf( "| Index | Address | Value   |\n" );
+    printf( "|---------------------------|\n" );
+    for ( int i = 0; i < MEM_SIZE; i++ ) {
+        printf( "|  %3d  |  0x%02X   |  %5d  |\n", i,
+                ( processorId << 4 ) + i, node.memory[i] );
     }
-    printf("------------------------------\n\n");
+    printf( "-----------------------------\n\n" );
 
     // Print directory state
-    printf("------------ Directory State ---------------\n");
-    printf("| Index | Address | State |    BitVector   |\n");
-    printf("|------------------------------------------|\n");
-    for (int i = 0; i < MEM_SIZE; i++) {
-        printf("|  %3d  |  0x%02X   |  %2s   |   0x%08B   |\n", i,
+    printf( "------------ Directory State --------------\n" );
+    printf( "| Index | Address | State | BitVector     |\n" );
+    printf( "|-----------------------------------------|\n" );
+    for ( int i = 0; i < MEM_SIZE; i++ ) {
+        printf( "|  %3d  |  0x%02X   |  %2s  |   0x%08X   |\n", i,
                 ( processorId << 4 ) + i, dirStateStr[node.directory[i].state],
-                node.directory[i].bitVector);
+                node.directory[i].bitVector );
     }
-    printf("--------------------------------------------\n\n");
-    
+    printf( "-------------------------------------------\n\n" );
+
     // Print cache state
-    printf("------------ Cache State ----------------\n");
-    printf("| Index | Address | Value |    State    |\n");
-    printf("|---------------------------------------|\n");
-    for (int i = 0; i < CACHE_SIZE; i++) {
-        printf("|  %3d  |  0x%02X   |  %3d  |  %8s \t|\n", 
-               i, node.cache[i].address, node.cache[i].value,
-               cacheStateStr[node.cache[i].state]);
+    printf( "------------ Cache State ----------------\n" );
+    printf( "| Index | Address | Value |  State      |\n" );
+    printf( "|---------------------------------------|\n" );
+    for ( int i = 0; i < CACHE_SIZE; i++ ) {
+        printf( "|  %3d  |  0x%02X   |  %3d  |  %-9s  |\n", i,
+                node.cache[i].address, node.cache[i].value,
+                cacheStateStr[node.cache[i].state] );
     }
-    printf("----------------------------------------\n\n");
-    }
+    printf( "----------------------------------------\n\n" );
 }
